@@ -1,0 +1,54 @@
+@baseUrl = http://localhost:8080/api/v1
+@username = staff.north.thali
+@password = replace-with-XEATS_DEMO_PASSWORD
+@counterId = 00000000-0000-4000-8000-000000000301
+@orderId = copy-order-id-from-employee-checkout
+@pickupCode = copy-pickup-code-from-employee-checkout
+@reportDate = 2026-10-20
+
+### Create a staff session CSRF token
+# @name staffLoginCsrf
+GET {{baseUrl}}/auth/csrf
+
+### Sign in as staff assigned to the counter that serves this food item
+# @name staffLogin
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+X-XSRF-TOKEN: {{staffLoginCsrf.response.body.$.token}}
+
+{
+  "username": "{{username}}",
+  "password": "{{password}}"
+}
+
+### Login rotates the CSRF token; fetch the authenticated-session token
+# @name staffCsrf
+GET {{baseUrl}}/auth/csrf
+
+### Confirm the session is assigned to this counter
+GET {{baseUrl}}/staff/counters
+
+### Find the employee's accepted order in this counter queue
+GET {{baseUrl}}/staff/counters/{{counterId}}/orders?status=ACCEPTED
+
+### Start preparing the meal; a new order starts at version 1
+POST {{baseUrl}}/staff/orders/{{orderId}}/preparing
+X-XSRF-TOKEN: {{staffCsrf.response.body.$.token}}
+If-Match: "1"
+
+### Mark the meal ready; preparing increments the order version to 2
+POST {{baseUrl}}/staff/orders/{{orderId}}/ready
+X-XSRF-TOKEN: {{staffCsrf.response.body.$.token}}
+If-Match: "2"
+
+### Redeem the employee's pickup token at the matching counter
+POST {{baseUrl}}/staff/counters/{{counterId}}/pickup-redemptions
+Content-Type: application/json
+X-XSRF-TOKEN: {{staffCsrf.response.body.$.token}}
+
+{
+  "code": "{{pickupCode}}"
+}
+
+### Read demand for the selected campus-local date; update @reportDate before running
+GET {{baseUrl}}/staff/counters/{{counterId}}/report?startDate={{reportDate}}&endDate={{reportDate}}

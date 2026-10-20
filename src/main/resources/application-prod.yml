@@ -1,0 +1,9 @@
+server:
+  servlet:
+    session:
+      cookie:
+        secure: true
+
+xeats:
+  security:
+    allowed-origins: ${XEATS_ALLOWED_ORIGINS}

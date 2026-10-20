@@ -1,0 +1,3 @@
+xeats:
+  demo:
+    password: ${XEATS_DEMO_PASSWORD:}

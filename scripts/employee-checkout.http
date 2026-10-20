@@ -1,0 +1,52 @@
+@baseUrl = http://localhost:8080/api/v1
+@username = employee.demo.01
+@password = replace-with-XEATS_DEMO_PASSWORD
+@counterId = 00000000-0000-4000-8000-000000000301
+@idempotencyKey = 7a223217-c29d-4c18-9e24-164fe205f701
+
+### Create a session CSRF token
+# @name csrf
+GET {{baseUrl}}/auth/csrf
+
+### Sign in; REST Client retains the session cookie between requests
+# @name login
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+X-XSRF-TOKEN: {{csrf.response.body.$.token}}
+
+{
+  "username": "{{username}}",
+  "password": "{{password}}"
+}
+
+### Login rotates the CSRF token; fetch the authenticated-session token before mutations
+# @name employeeCsrf
+GET {{baseUrl}}/auth/csrf
+
+### Read fresh availability and let the API recommend the closest pickup window
+# @name options
+GET {{baseUrl}}/counters/{{counterId}}/order-options
+
+### Confirm one meal from one counter (one order and one token)
+# @name createOrder
+POST {{baseUrl}}/orders
+Content-Type: application/json
+X-XSRF-TOKEN: {{employeeCsrf.response.body.$.token}}
+Idempotency-Key: {{idempotencyKey}}
+
+{
+  "counterId": "{{counterId}}",
+  "pickupSlotId": "{{options.response.body.$.recommendedWindowId}}"
+}
+
+### List active orders across all of this employee's counters; tokens are omitted
+GET {{baseUrl}}/me/orders
+
+### Read the owner-scoped order and pickup token
+GET {{baseUrl}}/me/orders/{{createOrder.response.body.$.id}}
+
+### Read terminal history by repeating a status filter
+GET {{baseUrl}}/me/orders?status=COLLECTED&status=EXPIRED&page=0&size=25
+
+# Fulfillment handoff: copy createOrder.response.body.$.id and
+# createOrder.response.body.$.pickupToken.code into scripts/staff-fulfillment.http.

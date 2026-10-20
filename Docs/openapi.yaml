@@ -1,0 +1,1937 @@
+openapi: 3.1.0
+info:
+  title: Xeats Shared Backend API
+  version: 1.0.0-draft.1
+  description: >-
+    Contract for the employee and counter-staff web applications. See Backend-Contract.md
+    for domain rules, scheduling math, locking order, examples and release gates. All data
+    is synthetic; payment is simulated. No employee, order quantity, item, price or pickup
+    token may be trusted from a caller when the server can derive or validate it.
+servers:
+  - url: http://localhost:8080/api/v1
+    description: Local API behind the employee/vendor development proxy
+tags:
+  - name: Session
+  - name: Discovery
+  - name: Employee orders
+  - name: Counter staff
+  - name: Demo administration
+  - name: Live updates
+  - name: Operations
+security:
+  - SessionCookie: []
+paths:
+  /auth/csrf:
+    get:
+      tags: [Session]
+      operationId: getCsrfToken
+      security: []
+      summary: Get or refresh the session-bound CSRF token required by mutations
+      description: Fetch before login and again after successful login or logout before sending another mutation.
+      responses:
+        '200':
+          description: Token bound to the response's session/cookie context
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CsrfToken'
+        default:
+          $ref: '#/components/responses/Problem'
+  /auth/login:
+    post:
+      tags: [Session]
+      operationId: logIn
+      security: []
+      summary: Start a fictional demo session
+      description: >-
+        Passwords are synthetic demo-account passwords. Corporate SSO is out of scope.
+        Successful authentication clears the submitted CSRF token; fetch a fresh token from /auth/csrf
+        before the next mutation.
+      parameters:
+        - $ref: '#/components/parameters/CsrfHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Session cookie set; identity is also available through GET /auth/me
+          headers:
+            Set-Cookie:
+              description: HttpOnly JSESSIONID session cookie; Secure over HTTPS; SameSite=Lax
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CurrentUser'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /auth/logout:
+    post:
+      tags: [Session]
+      operationId: logOut
+      summary: Invalidate the current demo session
+      parameters:
+        - $ref: '#/components/parameters/CsrfHeader'
+      responses:
+        '204':
+          description: Session invalidated
+        '401':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /auth/me:
+    get:
+      tags: [Session]
+      operationId: getCurrentUser
+      summary: Get the signed-in user and counter assignments
+      responses:
+        '200':
+          description: Current authenticated identity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CurrentUser'
+        '401':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /food-courts:
+    get:
+      tags: [Discovery]
+      operationId: listFoodCourts
+      summary: List configured active food courts
+      responses:
+        '200':
+          description: Active food courts
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/FoodCourt'
+        default:
+          $ref: '#/components/responses/Problem'
+  /food-courts/{foodCourtId}/vendors:
+    get:
+      tags: [Discovery]
+      operationId: listVendors
+      summary: List active vendors in a food court
+      parameters:
+        - $ref: '#/components/parameters/FoodCourtId'
+      responses:
+        '200':
+          description: Vendors in the requested active food court
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Vendor'
+        default:
+          $ref: '#/components/responses/Problem'
+  /vendors/{vendorId}/counters:
+    get:
+      tags: [Discovery]
+      operationId: listVendorCounters
+      summary: List active counters and each counter's single assigned meal
+      parameters:
+        - $ref: '#/components/parameters/VendorId'
+      responses:
+        '200':
+          description: Active vendor counters
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CounterSummary'
+        default:
+          $ref: '#/components/responses/Problem'
+  /counters/{counterId}:
+    get:
+      tags: [Discovery]
+      operationId: getCounter
+      summary: Get a counter's meal, availability and pickup instructions
+      parameters:
+        - $ref: '#/components/parameters/CounterId'
+      responses:
+        '200':
+          description: Counter discovery details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CounterSummary'
+        '404':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /counters/{counterId}/order-options:
+    get:
+      tags: [Discovery]
+      operationId: getOrderOptions
+      summary: Quote selectable pickup windows; this request reserves nothing
+      description: The earliest feasible window is the default the employee may accept or change. A closed or sold-out counter returns an empty quote with noOptionsReason instead of a problem response.
+      parameters:
+        - $ref: '#/components/parameters/CounterId'
+        - name: from
+          in: query
+          required: false
+          description: Earliest instant to include; defaults to the current instant.
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          description: Latest instant to include; capped by the configured advance-order horizon.
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Current authoritative quote; revalidated atomically at confirmation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderOptions'
+        '404':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /orders:
+    post:
+      tags: [Employee orders]
+      operationId: createOrder
+      summary: Confirm one meal from one counter
+      description: >-
+        Automatically accepts a valid order. The server resolves meal, price, payment marker,
+        and employee identity. The selected slot ID must be copied from the displayed quote,
+        including when it was the recommended default. Never silently assigns another slot.
+      parameters:
+        - $ref: '#/components/parameters/CsrfHeader'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrderRequest'
+      responses:
+        '201':
+          description: New accepted order, unique pickup code and committed pickup allocation
+          headers:
+            Location:
+              description: Owner-scoped URL of the new order
+              schema:
+                type: string
+                format: uri-reference
+            ETag:
+              $ref: '#/components/headers/OrderETag'
+            Idempotency-Replayed:
+              description: False for a newly created order
+              schema:
+                type: boolean
+                default: false
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmployeeOrder'
+        '200':
+          description: Exact replay of the original successful idempotency key
+          headers:
+            ETag:
+              $ref: '#/components/headers/OrderETag'
+            Idempotency-Replayed:
+              description: True when returning the original confirmed order
+              schema:
+                type: boolean
+                const: true
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmployeeOrder'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /me/orders:
+    get:
+      tags: [Employee orders]
+      operationId: listMyOrders
+      summary: List only the signed-in employee's active or historical orders
+      parameters:
+        - $ref: '#/components/parameters/OrderStatusFilter'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Orders placed by the signed-in employee
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmployeeOrderPage'
+        default:
+          $ref: '#/components/responses/Problem'
+  /me/orders/{orderId}:
+    get:
+      tags: [Employee orders]
+      operationId: getMyOrder
+      summary: Get an owned order, including its currently valid pickup code
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: An order owned by the signed-in employee
+          headers:
+            ETag:
+              $ref: '#/components/headers/OrderETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmployeeOrder'
+        '404':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /staff/counters:
+    get:
+      tags: [Counter staff]
+      operationId: listAssignedCounters
+      summary: List counters the signed-in staff member can operate
+      responses:
+        '200':
+          description: Assigned counters only
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/StaffCounter'
+        '403':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /staff/counters/{counterId}/orders:
+    get:
+      tags: [Counter staff]
+      operationId: listCounterOrders
+      summary: List orders for an assigned counter, ordered by pickup commitment
+      parameters:
+        - $ref: '#/components/parameters/CounterId'
+        - name: status
+          in: query
+          required: false
+          description: Repeat for multiple states. Defaults to active orders.
+          schema:
+            type: array
+            items:
+              $ref: '#/components/schemas/OrderStatus'
+          style: form
+          explode: true
+        - name: pickupWindowStart
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: overdue
+          in: query
+          required: false
+          schema:
+            type: boolean
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Orders for this assigned counter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StaffOrderPage'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /staff/counters/{counterId}/capacity:
+    get:
+      tags: [Counter staff]
+      operationId: getCounterCapacity
+      summary: View pickup-window utilization, reserved walk-in capacity and unready workload
+      parameters:
+        - $ref: '#/components/parameters/CounterId'
+        - name: from
+          in: query
+          required: false
+          description: Defaults to now; response is limited by the counter's advance-order horizon.
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          description: Maximum returned range is 24 hours.
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Capacity and utilization for this assigned counter only
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CounterCapacityStatus'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /staff/orders/{orderId}/preparing:
+    post:
+      tags: [Counter staff]
+      operationId: beginPreparing
+      summary: Move an accepted order into preparation
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+        - $ref: '#/components/parameters/CsrfHeader'
+        - $ref: '#/components/parameters/IfMatch'
+      responses:
+        '200':
+          description: Updated order
+          headers:
+            ETag:
+              $ref: '#/components/headers/OrderETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StaffOrder'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '412':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /staff/orders/{orderId}/ready:
+    post:
+      tags: [Counter staff]
+      operationId: markOrderReady
+      summary: Mark a preparing order ready for counter pickup
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+        - $ref: '#/components/parameters/CsrfHeader'
+        - $ref: '#/components/parameters/IfMatch'
+      responses:
+        '200':
+          description: Updated order; actual readiness timestamp recorded
+          headers:
+            ETag:
+              $ref: '#/components/headers/OrderETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StaffOrder'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '412':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /staff/orders/{orderId}/expiry:
+    post:
+      tags: [Counter staff]
+      operationId: expireOrder
+      summary: Manually expire an accepted, preparing or ready order
+      description: There is no automatic expiry. Staff must explain why an active order can no longer be fulfilled.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+        - $ref: '#/components/parameters/CsrfHeader'
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExpireOrderRequest'
+      responses:
+        '200':
+          description: Expired order; token invalidated and active-order claim released
+          headers:
+            ETag:
+              $ref: '#/components/headers/OrderETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StaffOrder'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '412':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /staff/counters/{counterId}/pickup-redemptions:
+    post:
+      tags: [Counter staff]
+      operationId: redeemPickupToken
+      summary: Collect a ready order using its token at the assigned counter
+      description: One successful redemption at the correct assigned counter; replayed/expired codes cannot collect again.
+      parameters:
+        - $ref: '#/components/parameters/CounterId'
+        - $ref: '#/components/parameters/CsrfHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RedeemPickupTokenRequest'
+      responses:
+        '200':
+          description: Collected order with collection timestamp
+          headers:
+            ETag:
+              $ref: '#/components/headers/OrderETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StaffOrder'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /staff/counters/{counterId}/item:
+    patch:
+      tags: [Counter staff]
+      operationId: updateCounterItem
+      summary: Edit the one item's discovery details and price
+      description: Existing orders retain the price and name snapshots from confirmation.
+      parameters:
+        - $ref: '#/components/parameters/CounterId'
+        - $ref: '#/components/parameters/CsrfHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateMenuItemRequest'
+      responses:
+        '200':
+          description: Updated meal at this counter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MenuItem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /staff/counters/{counterId}/availability:
+    put:
+      tags: [Counter staff]
+      operationId: setItemAvailability
+      summary: Set the assigned item Available or Sold out
+      parameters:
+        - $ref: '#/components/parameters/CounterId'
+        - $ref: '#/components/parameters/CsrfHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AvailabilityRequest'
+      responses:
+        '200':
+          description: Current item availability; existing orders are unchanged
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MenuItem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /staff/counters/{counterId}/ordering:
+    put:
+      tags: [Counter staff]
+      operationId: setCounterOnlineAdmission
+      summary: Open or close admission for new online orders
+      description: Closing online admission does not stop staff fulfilling accepted orders.
+      parameters:
+        - $ref: '#/components/parameters/CounterId'
+        - $ref: '#/components/parameters/CsrfHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OnlineAdmissionRequest'
+      responses:
+        '200':
+          description: Current admission setting
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CounterSummary'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /staff/counters/{counterId}/opening-hours:
+    put:
+      tags: [Counter staff]
+      operationId: replaceOpeningHours
+      summary: Replace weekly local opening intervals for an assigned counter
+      parameters:
+        - $ref: '#/components/parameters/CounterId'
+        - $ref: '#/components/parameters/CsrfHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OpeningHoursRequest'
+      responses:
+        '200':
+          description: Updated opening-hours schedule
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OpeningHours'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /staff/counters/{counterId}/capacity-policy:
+    put:
+      tags: [Counter staff]
+      operationId: updateCapacityPolicy
+      summary: Replace the capacity policy for newly generated or explicitly regenerated unbooked windows
+      parameters:
+        - $ref: '#/components/parameters/CounterId'
+        - $ref: '#/components/parameters/CsrfHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CapacityPolicyRequest'
+      responses:
+        '200':
+          description: New policy revision; already-booked pickup commitments remain unchanged
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CapacityPolicy'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /admin/food-courts:
+    post:
+      tags: [Demo administration]
+      operationId: createFoodCourt
+      summary: Create a synthetic food court
+      parameters:
+        - $ref: '#/components/parameters/CsrfHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateFoodCourtRequest'
+      responses:
+        '201':
+          description: Created food court
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FoodCourt'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /admin/food-courts/{foodCourtId}/vendors:
+    post:
+      tags: [Demo administration]
+      operationId: createVendor
+      summary: Create a synthetic vendor under a food court
+      parameters:
+        - $ref: '#/components/parameters/FoodCourtId'
+        - $ref: '#/components/parameters/CsrfHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateVendorRequest'
+      responses:
+        '201':
+          description: Created vendor
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Vendor'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /admin/vendors/{vendorId}/counters:
+    post:
+      tags: [Demo administration]
+      operationId: createCounterWithItsMeal
+      summary: Create a counter, its single meal, capacity policy and opening schedule together
+      description: Counter and menu item are one atomic creation; a counter cannot be left without its one assigned meal.
+      parameters:
+        - $ref: '#/components/parameters/VendorId'
+        - $ref: '#/components/parameters/CsrfHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCounterRequest'
+      responses:
+        '201':
+          description: New counter, its item and capacity/opening configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CounterSummary'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /admin/counters/{counterId}/staff:
+    post:
+      tags: [Demo administration]
+      operationId: assignStaffToCounter
+      summary: Assign an existing fictional vendor-staff account to a counter
+      parameters:
+        - $ref: '#/components/parameters/CounterId'
+        - $ref: '#/components/parameters/CsrfHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [userId]
+              properties:
+                userId:
+                  type: string
+                  format: uuid
+      responses:
+        '204':
+          description: Assignment exists; repeat assignment is safe
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /admin/counters/{counterId}/active:
+    put:
+      tags: [Demo administration]
+      operationId: setCounterActive
+      summary: Activate or deactivate a configured counter
+      description: >-
+        Deactivating removes the counter from employee discovery and stops new orders.
+        Staff retain access to fulfill its outstanding orders; no order is cancelled or expired.
+      parameters:
+        - $ref: '#/components/parameters/CounterId'
+        - $ref: '#/components/parameters/CsrfHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [active]
+              properties:
+                active:
+                  type: boolean
+      responses:
+        '200':
+          description: Current structural counter state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CounterSummary'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /admin/counters/{counterId}/staff/{userId}:
+    delete:
+      tags: [Demo administration]
+      operationId: removeStaffAssignment
+      summary: Remove a staff-to-counter assignment
+      parameters:
+        - $ref: '#/components/parameters/CounterId'
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/CsrfHeader'
+      responses:
+        '204':
+          description: Assignment removed; existing order history is retained
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /staff/counters/{counterId}/report:
+    get:
+      tags: [Counter staff]
+      operationId: getCounterReport
+      summary: Read date-bounded, simulated demand and fulfillment metrics for an assigned counter
+      parameters:
+        - $ref: '#/components/parameters/CounterId'
+        - name: startDate
+          in: query
+          required: true
+          description: Inclusive start date in the counter's food-court timezone.
+          schema:
+            type: string
+            format: date
+        - name: endDate
+          in: query
+          required: true
+          description: Inclusive end date in the counter's food-court timezone; the range may cover at most 31 local dates.
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Summary in the counter's food-court local timezone; simulated value is not settled revenue
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CounterReport'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /events:
+    get:
+      tags: [Live updates]
+      operationId: streamEvents
+      summary: Receive scoped change notifications; refetch snapshots after connection loss
+      description: >-
+        Session-scoped Server-Sent Events. Employee scope contains that employee's order state
+        changes and public availability/slot changes. Staff scope contains assigned-counter
+        events. Event types are ORDER_STATUS_CHANGED, ITEM_AVAILABILITY_CHANGED,
+        COUNTER_ADMISSION_CHANGED, OPENING_HOURS_CHANGED and SLOT_CAPACITY_CHANGED.
+        The SSE id/event fields identify the event; data is a LiveEvent JSON envelope.
+        Notifications are published after commit. Codes, credentials and personal data
+        are never included. A comment heartbeat is sent every five seconds, including while
+        the stream is otherwise idle. The server does not promise replay from Last-Event-ID;
+        after reconnect, refetch the relevant authorized order, counter, or capacity snapshot.
+        A logged-out, expired, disabled, or no-longer-authorized session is disconnected and
+        its audience is rechecked against current roles and counter assignments before delivery.
+      responses:
+        '200':
+          description: Live change notifications until disconnect or session expiry
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-cache
+            X-Accel-Buffering:
+              description: Reverse proxies must not buffer this response
+              schema:
+                type: string
+                const: 'no'
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              example: |
+                id: 519fba44-3f54-4906-98af-59d1022f5728
+                event: ORDER_STATUS_CHANGED
+                data: {"entityId":"51542f0c-f564-4e5b-9c12-2c7fd69de688","counterId":"519fba44-3f54-4906-98af-59d1022f5728","entityVersion":3,"occurredAt":"2026-10-19T06:31:14Z"}
+
+                : heartbeat
+
+        '401':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /actuator/health:
+    get:
+      tags: [Operations]
+      operationId: getHealth
+      security: []
+      servers:
+        - url: http://localhost:8080
+          description: Actuator is mounted outside the versioned API base path.
+      summary: Liveness and database readiness status
+      responses:
+        '200':
+          description: Service is running and required dependencies are ready
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '503':
+          description: Service is running but a required dependency is unavailable
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+components:
+  securitySchemes:
+    SessionCookie:
+      type: apiKey
+      in: cookie
+      name: JSESSIONID
+      description: HttpOnly server-side session issued at login; obtain a CSRF token separately before mutations.
+  parameters:
+    CsrfHeader:
+      name: X-XSRF-TOKEN
+      in: header
+      required: true
+      description: Value returned by GET /auth/csrf and echoed in this header while the same-origin session cookie is sent.
+      schema:
+        type: string
+        minLength: 32
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: UUID stable across retries of one confirmation attempt; generate a new UUID after changing the selected counter/window.
+      schema:
+        type: string
+        format: uuid
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: Strong ETag returned by the last order read, formatted as a quoted decimal version such as "4".
+      schema:
+        type: string
+        pattern: '^"[1-9][0-9]*"$'
+    FoodCourtId:
+      name: foodCourtId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    VendorId:
+      name: vendorId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    CounterId:
+      name: counterId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    OrderId:
+      name: orderId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    OrderStatusFilter:
+      name: status
+      in: query
+      required: false
+      description: Repeat for multiple lifecycle states; defaults to active orders.
+      schema:
+        type: array
+        items:
+          $ref: '#/components/schemas/OrderStatus'
+      style: form
+      explode: true
+    Page:
+      name: page
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+    PageSize:
+      name: size
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 25
+  headers:
+    OrderETag:
+      description: Strong decimal order version. Send unchanged as If-Match on a staff state transition.
+      schema:
+        type: string
+        pattern: '^"[1-9][0-9]*"$'
+  responses:
+    Problem:
+      description: RFC 9457 problem with a stable Xeats error code
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+  schemas:
+    CsrfToken:
+      type: object
+      required: [headerName, token]
+      properties:
+        headerName:
+          type: string
+          const: X-XSRF-TOKEN
+        token:
+          type: string
+          minLength: 32
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          minLength: 3
+          maxLength: 80
+        password:
+          type: string
+          minLength: 1
+          maxLength: 256
+          writeOnly: true
+    Role:
+      type: string
+      enum: [EMPLOYEE, VENDOR_STAFF, DEMO_ADMIN]
+    CurrentUser:
+      type: object
+      required: [id, username, roles, assignedCounterIds]
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        roles:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/Role'
+        assignedCounterIds:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            format: uuid
+    FoodCourt:
+      type: object
+      required: [id, code, name, timeZone]
+      properties:
+        id:
+          type: string
+          format: uuid
+        code:
+          type: string
+          example: FC1
+        name:
+          type: string
+        timeZone:
+          type: string
+          const: Asia/Kolkata
+    Vendor:
+      type: object
+      required: [id, foodCourtId, name]
+      properties:
+        id:
+          type: string
+          format: uuid
+        foodCourtId:
+          type: string
+          format: uuid
+        name:
+          type: string
+    Money:
+      type: object
+      additionalProperties: false
+      required: [amountMinor, currency]
+      properties:
+        amountMinor:
+          type: integer
+          minimum: 0
+          description: Integer paise for INR; never binary floating point.
+          example: 8500
+        currency:
+          type: string
+          const: INR
+    Availability:
+      type: string
+      enum: [AVAILABLE, SOLD_OUT]
+    MenuItem:
+      type: object
+      required: [id, name, price, availability]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: [string, 'null']
+        category:
+          type: [string, 'null']
+        price:
+          $ref: '#/components/schemas/Money'
+        availability:
+          $ref: '#/components/schemas/Availability'
+    CounterSummary:
+      type: object
+      required: [id, vendorId, name, pickupInstructions, active, acceptingOnlineOrders, item]
+      properties:
+        id:
+          type: string
+          format: uuid
+        vendorId:
+          type: string
+          format: uuid
+        name:
+          type: string
+        pickupInstructions:
+          type: string
+        active:
+          type: boolean
+          description: Inactive counters are hidden from employees; staff can finish existing orders.
+        acceptingOnlineOrders:
+          type: boolean
+        item:
+          $ref: '#/components/schemas/MenuItem'
+    StaffCounter:
+      allOf:
+        - $ref: '#/components/schemas/CounterSummary'
+        - type: object
+          required: [openNow, queueCounts, nextPickupWindow]
+          properties:
+            openNow:
+              type: boolean
+            queueCounts:
+              $ref: '#/components/schemas/QueueCounts'
+            nextPickupWindow:
+              anyOf:
+                - $ref: '#/components/schemas/PickupWindow'
+                - type: 'null'
+    PickupWindow:
+      type: object
+      required: [id, startAt, endAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        startAt:
+          type: string
+          format: date-time
+        endAt:
+          type: string
+          format: date-time
+    OrderOptions:
+      type: object
+      required: [counter, timeZone, selectableWindows, unavailableWindows]
+      properties:
+        counter:
+          $ref: '#/components/schemas/CounterSummary'
+        timeZone:
+          type: string
+          example: Asia/Kolkata
+        selectableWindows:
+          type: array
+          items:
+            $ref: '#/components/schemas/SelectableWindow'
+        unavailableWindows:
+          type: array
+          items:
+            $ref: '#/components/schemas/UnavailableWindow'
+        recommendedWindowId:
+          type: [string, 'null']
+          format: uuid
+          description: Earliest selectable window; null when none can be fulfilled within the configured horizon.
+        noOptionsReason:
+          type: [string, 'null']
+          enum: [ITEM_SOLD_OUT, COUNTER_CLOSED, ORDERING_PAUSED, NO_ONLINE_CAPACITY, NO_FEASIBLE_WINDOW, null]
+    SelectableWindow:
+      allOf:
+        - $ref: '#/components/schemas/PickupWindow'
+        - type: object
+          required: [onlineCapacity, allocated, remaining, estimatedReadyAt, estimateIsApproximate, expectedOnsiteWaitMinutes, onsiteWaitUnavailableReason]
+          properties:
+            onlineCapacity:
+              type: integer
+              minimum: 1
+            allocated:
+              type: integer
+              minimum: 0
+            remaining:
+              type: integer
+              minimum: 0
+            estimatedReadyAt:
+              type: string
+              format: date-time
+            estimateIsApproximate:
+              type: boolean
+              const: true
+            expectedOnsiteWaitMinutes:
+              type: 'null'
+              description: Null until measured walk-in and handover inputs support this separate estimate.
+            onsiteWaitUnavailableReason:
+              type: string
+              const: WALK_IN_AND_HANDOVER_TIMES_NOT_MEASURED
+    UnavailableWindow:
+      allOf:
+        - $ref: '#/components/schemas/PickupWindow'
+        - type: object
+          required: [reason]
+          properties:
+            reason:
+              type: string
+              enum: [WINDOW_FULL, NO_ONLINE_CAPACITY, PREPARATION_BACKLOG, OUTSIDE_PREPARATION_LEAD, OUTSIDE_OPENING_HOURS]
+    CreateOrderRequest:
+      type: object
+      additionalProperties: false
+      required: [counterId, pickupSlotId]
+      properties:
+        counterId:
+          type: string
+          format: uuid
+        pickupSlotId:
+          type: string
+          format: uuid
+    OrderStatus:
+      type: string
+      enum: [ACCEPTED, PREPARING, READY, COLLECTED, EXPIRED]
+    LiveEvent:
+      type: object
+      additionalProperties: false
+      required: [entityId, counterId, entityVersion, occurredAt]
+      properties:
+        entityId:
+          type: string
+          format: uuid
+          description: Order ID for a scoped order update, otherwise the changed public/counter resource ID.
+        counterId:
+          type: string
+          format: uuid
+        entityVersion:
+          type: integer
+          minimum: 1
+          description: Monotonic resource/order version for the authorized snapshot to refetch.
+        occurredAt:
+          type: string
+          format: date-time
+    OrderSnapshot:
+      type: object
+      required: [id, counterId, counterName, itemName, itemPrice, pickupWindow, estimatedReadyAt, estimateIsApproximate, expectedOnsiteWaitMinutes, onsiteWaitUnavailableReason, status, version, placedAt, overdue]
+      properties:
+        id:
+          type: string
+          format: uuid
+        counterId:
+          type: string
+          format: uuid
+        counterName:
+          type: string
+        pickupInstructions:
+          type: string
+        itemName:
+          type: string
+        itemPrice:
+          $ref: '#/components/schemas/Money'
+        pickupWindow:
+          $ref: '#/components/schemas/PickupWindow'
+        estimatedReadyAt:
+          type: [string, 'null']
+          format: date-time
+          description: Approximate readiness projection for accepted/preparing orders; READY and COLLECTED orders use the recorded readyAt; expired orders without a readyAt return null.
+        estimateIsApproximate:
+          type: boolean
+          description: True when estimatedReadyAt is projected from workload; false when it is an actual readiness timestamp or unavailable.
+        expectedOnsiteWaitMinutes:
+          type: 'null'
+          description: Null until physical walk-in and handover wait inputs are measured.
+        onsiteWaitUnavailableReason:
+          type: string
+          const: WALK_IN_AND_HANDOVER_TIMES_NOT_MEASURED
+        status:
+          $ref: '#/components/schemas/OrderStatus'
+        version:
+          type: integer
+          minimum: 1
+        placedAt:
+          type: string
+          format: date-time
+        acceptedAt:
+          type: string
+          format: date-time
+        preparingAt:
+          type: [string, 'null']
+          format: date-time
+        readyAt:
+          type: [string, 'null']
+          format: date-time
+        collectedAt:
+          type: [string, 'null']
+          format: date-time
+        expiredAt:
+          type: [string, 'null']
+          format: date-time
+        expiryReason:
+          type: [string, 'null']
+        overdue:
+          type: boolean
+          description: True when the window ended and status remains active. Does not trigger expiry.
+        simulatedPaymentStatus:
+          type: string
+          const: SIMULATED_SUCCEEDED
+    EmployeeOrder:
+      allOf:
+        - $ref: '#/components/schemas/OrderSnapshot'
+        - type: object
+          required: [pickupToken]
+          properties:
+            pickupToken:
+              type: object
+              required: [code, redeemable]
+              properties:
+                code:
+                  type: string
+                  pattern: '^[0-9A-HJKMNP-TV-Z]{10}$'
+                  description: Secret owner-scoped pickup code. Never included in events or list responses.
+                redeemable:
+                  type: boolean
+                  description: False after collection or expiry.
+    StaffOrder:
+      allOf:
+        - $ref: '#/components/schemas/OrderSnapshot'
+        - type: object
+          required: [employeeDisplayLabel]
+          properties:
+            employeeDisplayLabel:
+              type: string
+              description: Minimal fictional demo identifier required to hand an order to its owner.
+    EmployeeOrderPage:
+      type: object
+      required: [items, page, size, totalItems, totalPages]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/EmployeeOrderSummary'
+        page:
+          type: integer
+        size:
+          type: integer
+        totalItems:
+          type: integer
+        totalPages:
+          type: integer
+    EmployeeOrderSummary:
+      allOf:
+        - $ref: '#/components/schemas/OrderSnapshot'
+      description: Employee list view; omits the pickup code. Get an owner-scoped order detail to show its code.
+    StaffOrderPage:
+      type: object
+      required: [items, page, size, totalItems, totalPages]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/StaffOrder'
+        page:
+          type: integer
+        size:
+          type: integer
+        totalItems:
+          type: integer
+        totalPages:
+          type: integer
+    QueueCounts:
+      type: object
+      required: [accepted, preparing, ready, due, overdue]
+      properties:
+        accepted:
+          type: integer
+          minimum: 0
+        preparing:
+          type: integer
+          minimum: 0
+        ready:
+          type: integer
+          minimum: 0
+        due:
+          type: integer
+          minimum: 0
+          description: Active orders whose pickup window has started and has not ended.
+        overdue:
+          type: integer
+          minimum: 0
+    CounterCapacityStatus:
+      type: object
+      required: [counterId, timeZone, policy, windows]
+      properties:
+        counterId:
+          type: string
+          format: uuid
+        timeZone:
+          type: string
+          example: Asia/Kolkata
+        policy:
+          $ref: '#/components/schemas/CapacityPolicy'
+        windows:
+          type: array
+          items:
+            $ref: '#/components/schemas/StaffCapacityWindow'
+    StaffCapacityWindow:
+      allOf:
+        - $ref: '#/components/schemas/PickupWindow'
+        - type: object
+          required: [totalMeals, walkInReserved, onlineCapacity, confirmedAllocations, remainingOnlineAllocations, unreadyEarlierOrders, estimatedLatestReadyAt, estimateIsApproximate, expectedOnsiteWaitMinutes, onsiteWaitUnavailableReason, selectable]
+          properties:
+            totalMeals:
+              type: integer
+              minimum: 1
+            walkInReserved:
+              type: integer
+              minimum: 0
+              description: Capacity reserved for walk-ins; this is not a count of measured walk-in orders.
+            onlineCapacity:
+              type: integer
+              minimum: 0
+            confirmedAllocations:
+              type: integer
+              minimum: 0
+              description: Confirmed positions remain committed after collection or manual expiry.
+            remainingOnlineAllocations:
+              type: integer
+              minimum: 0
+            unreadyEarlierOrders:
+              type: integer
+              minimum: 0
+              description: Active ACCEPTED/PREPARING commitments in strictly earlier pickup windows. Same-window commitments are included when checking whether a new booking is selectable.
+            estimatedLatestReadyAt:
+              type: [string, 'null']
+              format: date-time
+              description: Latest projected readiness among active reservations in this window; READY orders use their actual readyAt. Null when there is no active reservation.
+            estimateIsApproximate:
+              type: boolean
+              description: True when the latest readiness value is projected; false when it is an actual timestamp or unavailable.
+            expectedOnsiteWaitMinutes:
+              type: 'null'
+              description: Null until physical walk-in and handover wait inputs are measured.
+            onsiteWaitUnavailableReason:
+              type: string
+              const: WALK_IN_AND_HANDOVER_TIMES_NOT_MEASURED
+            selectable:
+              type: boolean
+    ExpireOrderRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 3
+          maxLength: 500
+    RedeemPickupTokenRequest:
+      type: object
+      additionalProperties: false
+      required: [code]
+      properties:
+        code:
+          type: string
+          pattern: '^[0-9A-HJKMNP-TV-Z]{10}$'
+    UpdateMenuItemRequest:
+      type: object
+      additionalProperties: false
+      required: [name, price]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        description:
+          type: [string, 'null']
+          maxLength: 500
+        category:
+          type: [string, 'null']
+          maxLength: 60
+        price:
+          $ref: '#/components/schemas/Money'
+    AvailabilityRequest:
+      type: object
+      additionalProperties: false
+      required: [availability]
+      properties:
+        availability:
+          $ref: '#/components/schemas/Availability'
+    OnlineAdmissionRequest:
+      type: object
+      additionalProperties: false
+      required: [acceptingOnlineOrders]
+      properties:
+        acceptingOnlineOrders:
+          type: boolean
+    DayOfWeek:
+      type: string
+      enum: [MONDAY, TUESDAY, WEDNESDAY, THURSDAY, FRIDAY, SATURDAY, SUNDAY]
+    OpeningInterval:
+      type: object
+      additionalProperties: false
+      required: [day, opensAt, closesAt]
+      properties:
+        day:
+          $ref: '#/components/schemas/DayOfWeek'
+        opensAt:
+          type: string
+          format: time
+          example: '11:00:00'
+        closesAt:
+          type: string
+          format: time
+          example: '14:00:00'
+          description: Exclusive; earlier clock time means the interval ends the following local day. Cannot equal opensAt.
+    OpeningHours:
+      type: object
+      required: [timeZone, intervals]
+      properties:
+        timeZone:
+          type: string
+          example: Asia/Kolkata
+        intervals:
+          type: array
+          items:
+            $ref: '#/components/schemas/OpeningInterval'
+    OpeningHoursRequest:
+      allOf:
+        - $ref: '#/components/schemas/OpeningHours'
+    CapacityPolicy:
+      type: object
+      required: [revision, slotDurationMinutes, totalMealsPerSlot, walkInReservePercent, onlineCapacityPerSlot, minimumPreparationLeadSeconds, maximumAdvanceMinutes, serviceSecondsPerMeal, effectiveAt]
+      properties:
+        revision:
+          type: integer
+          minimum: 1
+        slotDurationMinutes:
+          type: integer
+          enum: [5, 10, 15, 20, 25, 30]
+        totalMealsPerSlot:
+          type: integer
+          minimum: 1
+          maximum: 200
+        walkInReservePercent:
+          type: integer
+          minimum: 0
+          maximum: 100
+        onlineCapacityPerSlot:
+          type: integer
+          minimum: 0
+          readOnly: true
+          description: floor(totalMealsPerSlot * (100 - walkInReservePercent) / 100)
+        minimumPreparationLeadSeconds:
+          type: integer
+          minimum: 0
+          maximum: 1800
+        maximumAdvanceMinutes:
+          type: integer
+          minimum: 15
+          maximum: 1440
+        serviceSecondsPerMeal:
+          type: integer
+          minimum: 15
+          maximum: 600
+        effectiveAt:
+          type: string
+          format: date-time
+    CapacityPolicyRequest:
+      type: object
+      additionalProperties: false
+      required: [slotDurationMinutes, totalMealsPerSlot, walkInReservePercent, minimumPreparationLeadSeconds, maximumAdvanceMinutes, serviceSecondsPerMeal]
+      properties:
+        slotDurationMinutes:
+          type: integer
+          enum: [5, 10, 15, 20, 25, 30]
+        totalMealsPerSlot:
+          type: integer
+          minimum: 1
+          maximum: 200
+        walkInReservePercent:
+          type: integer
+          minimum: 0
+          maximum: 100
+        minimumPreparationLeadSeconds:
+          type: integer
+          minimum: 0
+          maximum: 1800
+        maximumAdvanceMinutes:
+          type: integer
+          minimum: 15
+          maximum: 1440
+        serviceSecondsPerMeal:
+          type: integer
+          minimum: 15
+          maximum: 600
+    CreateFoodCourtRequest:
+      type: object
+      additionalProperties: false
+      required: [code, name, timeZone]
+      properties:
+        code:
+          type: string
+          pattern: '^[A-Z0-9-]{2,20}$'
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        timeZone:
+          type: string
+          const: Asia/Kolkata
+    CreateVendorRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        serviceModel:
+          type: string
+          enum: [CENTRALIZED, INDEPENDENT]
+          default: INDEPENDENT
+          description: Defaults to an independently operated vendor when omitted.
+    CreateCounterRequest:
+      type: object
+      additionalProperties: false
+      required: [name, pickupInstructions, item, capacityPolicy, openingHours]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 80
+        pickupInstructions:
+          type: string
+          minLength: 1
+          maxLength: 300
+        item:
+          $ref: '#/components/schemas/NewMenuItem'
+        capacityPolicy:
+          $ref: '#/components/schemas/NewCapacityPolicy'
+        openingHours:
+          $ref: '#/components/schemas/OpeningHours'
+    NewMenuItem:
+      type: object
+      additionalProperties: false
+      required: [name, price]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        description:
+          type: [string, 'null']
+          maxLength: 500
+        category:
+          type: [string, 'null']
+          maxLength: 60
+        price:
+          $ref: '#/components/schemas/Money'
+    NewCapacityPolicy:
+      type: object
+      additionalProperties: false
+      required: [slotDurationMinutes, totalMealsPerSlot, walkInReservePercent, minimumPreparationLeadSeconds, maximumAdvanceMinutes, serviceSecondsPerMeal]
+      properties:
+        slotDurationMinutes:
+          type: integer
+          enum: [5, 10, 15, 20, 25, 30]
+        totalMealsPerSlot:
+          type: integer
+          minimum: 1
+          maximum: 200
+        walkInReservePercent:
+          type: integer
+          minimum: 0
+          maximum: 100
+        minimumPreparationLeadSeconds:
+          type: integer
+          minimum: 0
+          maximum: 1800
+        maximumAdvanceMinutes:
+          type: integer
+          minimum: 15
+          maximum: 1440
+        serviceSecondsPerMeal:
+          type: integer
+          minimum: 15
+          maximum: 600
+    CounterReport:
+      type: object
+      description: >-
+        Each metric uses its corresponding event timestamp within the inclusive campus-local date range.
+        Lifecycle timings use collected orders whose collectedAt is in range and omit unavailable or
+        negative-duration samples. Simulated values sum immutable order price snapshots and do not
+        represent settled funds, accounting, or revenue.
+      required: [timeZone, startDate, endDate, ordersAccepted, ordersCollected, ordersCollectedOnTime, ordersExpired, simulatedAcceptedValue, simulatedCollectedValue, mealsCollectedByItem, hourlyDistribution, timings]
+      properties:
+        timeZone:
+          type: string
+        startDate:
+          type: string
+          format: date
+        endDate:
+          type: string
+          format: date
+        ordersAccepted:
+          type: integer
+          minimum: 0
+          description: Orders with acceptedAt inside the report range.
+        ordersCollected:
+          type: integer
+          minimum: 0
+          description: Collected orders with collectedAt inside the report range.
+        ordersCollectedOnTime:
+          type: integer
+          minimum: 0
+          description: Collected orders collected before their pickup window's exclusive end time.
+        ordersExpired:
+          type: integer
+          minimum: 0
+          description: Expired orders with expiredAt inside the report range.
+        simulatedAcceptedValue:
+          allOf:
+            - $ref: '#/components/schemas/Money'
+          description: Sum of immutable simulated order values for orders accepted in range; not collected funds or revenue.
+        simulatedCollectedValue:
+          allOf:
+            - $ref: '#/components/schemas/Money'
+          description: Sum of immutable simulated order values for orders collected in range; not settlement or revenue.
+        mealsCollectedByItem:
+          type: array
+          description: Collected meals grouped by their historical item name and price snapshots.
+          items:
+            type: object
+            required: [itemName, itemPrice, count, simulatedValue]
+            properties:
+              itemName:
+                type: string
+              itemPrice:
+                $ref: '#/components/schemas/Money'
+              count:
+                type: integer
+                minimum: 0
+              simulatedValue:
+                allOf:
+                  - $ref: '#/components/schemas/Money'
+                description: Historical item-price snapshot multiplied by count; not revenue.
+        hourlyDistribution:
+          type: array
+          description: Exactly 24 local-hour bins (00 through 23), including zero-count bins; orders are bucketed by placedAt.
+          minItems: 24
+          maxItems: 24
+          items:
+            type: object
+            required: [localHour, ordersPlaced]
+            properties:
+              localHour:
+                type: integer
+                minimum: 0
+                maximum: 23
+              ordersPlaced:
+                type: integer
+                minimum: 0
+        timings:
+          type: object
+          required: [acceptedToPreparing, preparingToReady, readyToCollected, placedToCollected]
+          properties:
+            acceptedToPreparing:
+              $ref: '#/components/schemas/TimingSummary'
+            preparingToReady:
+              $ref: '#/components/schemas/TimingSummary'
+            readyToCollected:
+              $ref: '#/components/schemas/TimingSummary'
+            placedToCollected:
+              $ref: '#/components/schemas/TimingSummary'
+    TimingSummary:
+      type: object
+      required: [sampleCount, averageMinutes, p95Minutes]
+      properties:
+        sampleCount:
+          type: integer
+          minimum: 0
+          description: Number of nonnegative lifecycle durations available from collected orders in range.
+        averageMinutes:
+          type: [number, 'null']
+          minimum: 0
+          description: Mean duration in minutes rounded to two decimals; null when sampleCount is zero.
+        p95Minutes:
+          type: [number, 'null']
+          minimum: 0
+          description: Nearest-rank 95th percentile in minutes rounded to two decimals; null when sampleCount is zero.
+    Problem:
+      type: object
+      required: [type, title, status, code]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+        title:
+          type: string
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        code:
+          type: string
+          enum:
+            - UNAUTHENTICATED
+            - FORBIDDEN
+            - VALIDATION_ERROR
+            - NOT_FOUND
+            - CONFLICT
+            - COUNTER_CLOSED
+            - ORDERING_PAUSED
+            - ITEM_SOLD_OUT
+            - ACTIVE_ORDER_EXISTS
+            - SLOT_UNAVAILABLE
+            - IDEMPOTENCY_KEY_REUSED
+            - INVALID_ORDER_TRANSITION
+            - INVALID_OR_UNAVAILABLE_TOKEN
+            - PRECONDITION_FAILED
+            - RATE_LIMITED
+            - METHOD_NOT_ALLOWED
+            - INTERNAL_ERROR
+        detail:
+          type: string
+        instance:
+          type: string
+          format: uri-reference
+        fieldErrors:
+          type: array
+          items:
+            type: object
+            required: [field, message]
+            properties:
+              field:
+                type: string
+              message:
+                type: string
+        refreshedOrderOptions:
+          anyOf:
+            - $ref: '#/components/schemas/OrderOptions'
+            - type: 'null'
+        currentOrder:
+          anyOf:
+            - $ref: '#/components/schemas/StaffOrder'
+            - type: 'null'
+          description: Current authorized counter order returned when an If-Match precondition is stale.
+      allOf:
+        - if:
+            properties:
+              code:
+                const: SLOT_UNAVAILABLE
+            required: [code]
+          then:
+            required: [refreshedOrderOptions]
+            properties:
+              refreshedOrderOptions:
+                $ref: '#/components/schemas/OrderOptions'

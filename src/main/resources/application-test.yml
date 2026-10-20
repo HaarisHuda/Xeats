@@ -1,0 +1,13 @@
+spring:
+  datasource:
+    hikari:
+      connection-timeout: 1500
+      validation-timeout: 1000
+      maximum-pool-size: 3
+  jpa:
+    show-sql: false
+
+management:
+  endpoint:
+    health:
+      show-details: always

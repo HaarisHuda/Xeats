@@ -1,0 +1,32 @@
+name: Backend CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+      - name: Set up Java 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Set up Python for contract validation
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install OpenAPI validator dependency
+        run: python -m pip install --disable-pip-version-check -r scripts/requirements-contract.txt
+      - name: Verify build and MySQL integration tests
+        run: ./mvnw -B -ntp verify
+      - name: Validate OpenAPI and business contract
+        run: python scripts/validate_backend_contract.py
